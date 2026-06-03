@@ -1,96 +1,98 @@
-from pyfirmata import Arduino,SERVO
-import time
 import json
+import time
+from pyfirmata import Arduino, SERVO
 
-with open("dados.json") as jsondados:
-    dados = json.load(jsondados)
+board = None
+pinBase = None
+pinHorizontal = None
+pinVertical = None
+pinGarra = None
 
-portaCom = dados[0]["porta-com"]
-pinBaseNum = dados[0]["pin-base"]
-pinHorizontalNum = dados[0]["pin-horizontal"]
-pinVerticalNum = dados[0]["pin-vertical"]
-pinGarraNum = dados[0]["pin-garra"]
+atual_base = 0
+atual_horizontal = 0
+atual_vertical = 0
+atual_garra = 0
 
-board = Arduino(portaCom)
-pinBase = pinBaseNum
-pinHorintal = pinHorizontalNum
-pinVertical = pinVerticalNum
-pinGarra = pinGarraNum
 
-board.digital[pinBase].mode = SERVO
-board.digital[pinHorintal].mode = SERVO
-board.digital[pinVertical].mode = SERVO
-board.digital[pinGarra].mode = SERVO
+def _load_config():
+    with open("dados.json", "r", encoding="utf-8") as jsondados:
+        dados = json.load(jsondados)
 
-def rotateServo(pin,angle):
-    board.digital[pin].write(angle)
-    time.sleep(0.030)
+    if not dados or not isinstance(dados, list):
+        raise ValueError("dados.json deve conter uma lista com configuração do servo")
 
-atual5 = 0
-atual6 = 0
-atual7 = 0
-atual8 = 0
-numStep = 2
+    config = dados[0]
 
-movimentos = []
+    global pinBase, pinHorizontal, pinVertical, pinGarra
+    pinBase = config["pin-base"]
+    pinHorizontal = config["pin-horizontal"]
+    pinVertical = config["pin-vertical"]
+    pinGarra = config["pin-garra"]
 
-def mover(val5, val6, val7, val8):
-    global atual5
-    global atual6
-    global atual7
-    global atual8
+    return config.get("porta-com", "COM3")
 
-    # print('atual',atual5, atual6, atual7, atual8)
-    # print('valor',val5, val6, val7, val8)
 
-    if val5!=atual5:
-        orientacao = numStep if val5 >= atual5 else (numStep-(numStep*2))
-        print('orientacao val5',orientacao)
-        if orientacao >=1:
-            for x in range(atual5,val5,orientacao):
-                rotateServo(pinBase,x)
-        elif orientacao <0:
-            print('orientacao negativa')
-            for x in range(atual5,val5,orientacao):
-                rotateServo(pinBase,x)
+def _ensure_board():
+    global board
+    if board is not None:
+        return
 
-    if val6 != atual6:
-        orientacao = numStep if val6 >= atual6 else (numStep-(numStep*2))
-        print('orientacao val6', orientacao)
-        if orientacao >=1:
-            for x in range(atual6,val6,orientacao):
-                rotateServo(pinHorintal,x)
-        elif orientacao < 0:
-            print('orientacao negativa')
-            for x in range(atual6,val6,orientacao):
-                rotateServo(pinHorintal,x)
+    porta_com = _load_config()
+    board = Arduino(porta_com)
+    board.digital[pinBase].mode = SERVO
+    board.digital[pinHorizontal].mode = SERVO
+    board.digital[pinVertical].mode = SERVO
+    board.digital[pinGarra].mode = SERVO
+    time.sleep(1)
 
-    if val7 != atual7:
-        orientacao = numStep if val7 >= atual7 else (numStep-(numStep*2))
-        print('orientacao val7', orientacao)
-        if orientacao >=1:
-            for x in range(atual7,val7,orientacao):
-                rotateServo(pinVertical,x)
-        elif orientacao < 0:
-            print('orientacao negativa')
-            for x in range(atual7,val7,orientacao):
-                rotateServo(pinVertical,x)
 
-    if val8 != atual8:
-        orientacao = numStep if val8 >= atual8 else (numStep-(numStep*2))
-        print('orientacao val8', orientacao)
-        if orientacao >=1:
-            for x in range(atual8,val8,orientacao):
-                rotateServo(pinGarra,x)
-        elif orientacao <0:
-            print('orientacao negativa')
-            for x in range(atual8,val8,orientacao):
-                rotateServo(pinGarra,x)
+def _clamp_angle(angle):
+    return max(0, min(180, int(angle)))
 
-    atual5 = val5
-    atual6 = val6
-    atual7 = val7
-    atual8 = val8
+
+def rotateServo(pin, angle):
+    _ensure_board()
+    board.digital[pin].write(_clamp_angle(angle))
+    time.sleep(0.03)
+
+
+def _move_servo(pin, current, target):
+    target = _clamp_angle(target)
+    if current == target:
+        return
+
+    _ensure_board()
+    step = 1 if target > current else -1
+
+    for angle in range(current, target, step):
+        board.digital[pin].write(angle)
+        time.sleep(0.03)
+
+    board.digital[pin].write(target)
+    time.sleep(0.03)
+
+
+def mover(val_base, val_horizontal, val_vertical, val_garra):
+    global atual_base, atual_horizontal, atual_vertical, atual_garra
+
+    _ensure_board()
+
+    if val_base != atual_base:
+        _move_servo(pinBase, atual_base, val_base)
+
+    if val_horizontal != atual_horizontal:
+        _move_servo(pinHorizontal, atual_horizontal, val_horizontal)
+
+    if val_vertical != atual_vertical:
+        _move_servo(pinVertical, atual_vertical, val_vertical)
+
+    if val_garra != atual_garra:
+        _move_servo(pinGarra, atual_garra, val_garra)
+
+    atual_base = val_base
+    atual_horizontal = val_horizontal
+    atual_vertical = val_vertical
+    atual_garra = val_garra
 
 
 # print('passo1')
