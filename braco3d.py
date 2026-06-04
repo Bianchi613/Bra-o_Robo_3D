@@ -396,11 +396,16 @@ def _verificar_agarro(base_ang, hori_ang, vert_ang, garra_ang):
                 _cubo_pos[0] += (ddx / mag) * pen
                 _cubo_pos[2] += (ddz / mag) * pen
 
-        # Ângulo onde os dedos tocam as laterais do cubo (≈ 24°)
+        # Detecção de agarro pelas PONTAS DOS DEDOS (não pelo centro da garra).
+        # O IK posiciona as pontas em GY — a distância ponta→peça é ~0.4 un,
+        # muito menor que a distância centro→peça (~2.2 un).
+        tx, ty, tz = _fingertip_gl(base_ang, hori_ang, vert_ang)
+        dist_ponta  = math.sqrt((tx-cx)**2 + (ty-cy)**2 + (tz-cz)**2)
+        RAIO_PEGAR  = 1.2   # raio de captura medido pelas pontas
         GARRA_TOQUE = int(max(0, _CUBO_TAM - 0.18) / GRIP_MAX * 180)
 
-        if garra_ang <= GARRA_TOQUE and dist < _CUBO_RAIO:
-            # Dedos fechados sobre o cubo → agarra
+        if garra_ang <= GARRA_TOQUE and dist_ponta < RAIO_PEGAR:
+            # Pontas dos dedos fechadas sobre a peça → agarra
             _cubo_agarro = True
             _cubo_vy = 0.0
         else:

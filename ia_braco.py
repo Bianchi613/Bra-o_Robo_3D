@@ -169,7 +169,7 @@ def mover_peca(destino: str) -> bool:
     dx, dz = casa_para_gl(destino)
 
     TY   = 3.5   # y de trânsito: altura segura para se mover
-    GY   = 0.70  # y de descida: garra posicionada sobre a peça
+    GY   = 0.35  # y de descida: pontas dos dedos sobre a peça (acima do FLOOR_MARGIN=0.25)
     OPEN = 90    # garra aberta
     SHUT = 0     # garra fechada
 
