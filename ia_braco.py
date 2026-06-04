@@ -64,14 +64,16 @@ def gerar_historico() -> str:
 # CINEMÁTICA INVERSA (IK)
 # =========================
 # Constantes do braço (mesmas do braco3d)
-_L_BASE   = 3.50
-_L1       = 5.10
-_L2       = 3.70
-_GRIP_L   = 2.34
-# O agarro é detectado pelo CENTRO da garra (midpoint entre os dedos),
-# não pela ponta. Usar essa distância garante que o IK aponte o centro
-# da garra para o alvo, ativando o agarro automático do braco3d.
-_EXT = _L2 + 1.52 + _GRIP_L * 0.5   # elbow → centro da garra = 6.39 un
+_L_BASE = 3.50
+_L1     = 5.10
+_L2     = 3.70
+_GRIP_L = 2.34
+# Usa a extensão COMPLETA (ponta dos dedos = 8.20) para maximizar o workspace.
+# Com ext=6.39 (centro da garra) o máximo alcançável era ~11.6 un — H8 (12.0)
+# ficava fora. Com ext=8.20 o IK chega a ~13.4 un e cobre todo o tabuleiro.
+# O agarro ainda funciona pois o raio de captura (2.2 un) absorve o offset
+# entre a ponta e o centro da garra.
+_EXT = _L2 + 1.52 + _GRIP_L + 0.64  # elbow → ponta dos dedos = 8.20 un
 
 
 def ik_para_ponto(x_gl: float, y_gl: float, z_gl: float):
@@ -167,48 +169,60 @@ def mover_peca(destino: str) -> bool:
     dx, dz = casa_para_gl(destino)
 
     TY   = 3.5   # y de trânsito: altura segura para se mover
-    GY   = 0.50  # y de descida: centro da garra sobre a peça
+    GY   = 0.70  # y de descida: garra posicionada sobre a peça
     OPEN = 90    # garra aberta
     SHUT = 0     # garra fechada
 
+    # ── Validação prévia: todos os pontos devem ser alcançáveis ───────────
+    # Se qualquer ponto falhar NÃO iniciamos a sequência — evita o braço
+    # pegar a peça sem conseguir chegar ao destino.
+    pontos = [
+        (ox, TY, oz), (ox, TY, oz),          # passos 2 e 3 (sobre origem)
+        (ox, GY, oz), (ox, GY, oz),          # passos 4 e 5 (descer / fechar)
+        (ox, TY, oz),                         # passo 6 (levantar)
+        (dx, TY, dz),                         # passo 7 (voar destino)
+        (dx, GY, dz), (dx, GY, dz),          # passos 8 e 9 (descer / soltar)
+        (dx, TY, dz),                         # passo 10 (subir)
+    ]
+    for x, y, z in pontos:
+        if ik_para_ponto(x, y, z) is None:
+            print(f"  [xadrez] Posição inalcançável — destino {destino} está fora do alcance.")
+            return False
+
     print(f"\n  ♟  Rei Branco: {origem} → {destino}")
     salvar_memoria(f"mover rei para {destino}", f"MOVER:{destino}")
-
-    ok = True
 
     # ── Passo 1: levantar o braço antes de qualquer movimento ──────────────
     _fila.put("LEVANTAR_MAXIMO")
 
     # ── Passo 2: ir acima da peça (garra aberta) ───────────────────────────
-    ok &= _enqueue_ang(ox, TY, oz, OPEN)
+    _enqueue_ang(ox, TY, oz, OPEN)
 
     # ── Passo 3: abrir a garra (garantia) ─────────────────────────────────
-    ok &= _enqueue_ang(ox, TY, oz, OPEN)
+    _enqueue_ang(ox, TY, oz, OPEN)
 
     # ── Passo 4: descer até a peça (garra aberta) ─────────────────────────
-    ok &= _enqueue_ang(ox, GY, oz, OPEN)
+    _enqueue_ang(ox, GY, oz, OPEN)
 
     # ── Passo 5: fechar a garra → pega a peça ────────────────────────────
-    ok &= _enqueue_ang(ox, GY, oz, SHUT)
+    _enqueue_ang(ox, GY, oz, SHUT)
 
     # ── Passo 6: levantar com a peça ──────────────────────────────────────
-    ok &= _enqueue_ang(ox, TY, oz, SHUT)
+    _enqueue_ang(ox, TY, oz, SHUT)
 
     # ── Passo 7: voar horizontalmente até o destino ───────────────────────
-    ok &= _enqueue_ang(dx, TY, dz, SHUT)
+    _enqueue_ang(dx, TY, dz, SHUT)
 
     # ── Passo 8: descer no destino (peça ainda agarrada) ─────────────────
-    ok &= _enqueue_ang(dx, GY, dz, SHUT)
+    _enqueue_ang(dx, GY, dz, SHUT)
 
     # ── Passo 9: abrir a garra → solta a peça ────────────────────────────
-    ok &= _enqueue_ang(dx, GY, dz, OPEN)
+    _enqueue_ang(dx, GY, dz, OPEN)
 
     # ── Passo 10: voltar à posição inicial ───────────────────────────────
+    _enqueue_ang(dx, TY, dz, OPEN)
     _fila.put("REPOUSO")
-
-    if not ok:
-        print("  [xadrez] Atenção: algum ponto da sequência é inalcançável.")
-    return ok
+    return True
 
 # =========================
 # EXECUÇÃO DIRETA (camera.py usa isso)
