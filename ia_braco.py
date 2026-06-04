@@ -318,17 +318,19 @@ def _thread_ia():
         print(f"→ {resposta}")
         salvar_memoria(texto, resposta)
 
-        for acao in resposta.split(","):
-            acao = acao.strip()
-            if not acao:
-                continue
+        acoes = [a.strip() for a in resposta.split(",") if a.strip()]
 
-            # Comando de movimento de peça: MOVER:H5
-            if acao.startswith("MOVER:"):
-                destino = acao[6:].strip()
-                mover_peca(destino)   # coloca sequência _ANG_ na fila
+        # Se a resposta contém MOVER:, ignorar TODAS as outras ações.
+        # MOVER já cuida de toda a sequência (levantar, pegar, soltar, repouso).
+        # Misturar ações predefinidas com MOVER causa movimentos erráticos.
+        mover_cmds = [a for a in acoes if a.startswith("MOVER:")]
 
-            else:
+        if mover_cmds:
+            for cmd in mover_cmds:
+                destino = cmd[6:].strip()
+                mover_peca(destino)
+        else:
+            for acao in acoes:
                 _fila.put(acao)
 
 # =========================
