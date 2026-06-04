@@ -1,13 +1,19 @@
 """
-ia_braco.py — Controle inteligente do braço robótico.
+ia_braco.py — Controle inteligente do braço robótico com suporte a xadrez.
 
 Arquitetura de threads:
   Thread principal  → loop pygame 30 fps (janela sempre responsiva)
-  Thread IA         → input() + Ollama (sem bloquear a janela)
+  Thread IA         → input() + Ollama LLaMA (sem bloquear a janela)
   Thread servo      → movimento físico gradual (sem bloquear a janela)
+
+Comandos especiais retornados pelo LLaMA:
+  MOVER:E4          → pega o Rei Branco e deposita na casa E4
+  _ANG_b,h,v,g      → ângulos diretos (uso interno do mover_peca)
 """
 
 import json
+import math
+import re
 import time
 import threading
 import queue
@@ -36,6 +42,7 @@ braco = braco3d.Braco()
 # fila de ações produzidas pela thread de IA
 # None = sinal para encerrar o loop principal
 _fila: queue.Queue = queue.Queue()
+_VAZIO = object()
 
 # =========================
 # MEMÓRIA
@@ -50,10 +57,136 @@ def salvar_memoria(comando: str, acao: str):
 
 
 def gerar_historico() -> str:
-    return "\n".join(
-        f"Comando: {m['comando']} → {m['acao']}"
-        for m in MEMORIA
-    )
+    linhas = [f"Comando: {m['comando']} → {m['acao']}" for m in MEMORIA]
+    return "\n".join(linhas)
+
+# =========================
+# CINEMÁTICA INVERSA (IK)
+# =========================
+# Constantes do braço (mesmas do braco3d)
+_L_BASE   = 3.50
+_L1       = 5.10
+_L2       = 3.70
+_GRIP_L   = 2.34
+# O agarro é detectado pelo CENTRO da garra (midpoint entre os dedos),
+# não pela ponta. Usar essa distância garante que o IK aponte o centro
+# da garra para o alvo, ativando o agarro automático do braco3d.
+_EXT = _L2 + 1.52 + _GRIP_L * 0.5   # elbow → centro da garra = 6.39 un
+
+
+def ik_para_ponto(x_gl: float, y_gl: float, z_gl: float):
+    """
+    Cinemática inversa 2-link para posicionar a garra em (x, y, z) GL.
+
+    Retorna (base, hori, vert) em graus inteiros, ou None se inalcançável.
+    O cotovelo alto é preferido (braço arqueado por cima da peça).
+    """
+    # Ângulo de rotação da base (horizontal)
+    base = max(0, min(180, int(math.degrees(math.atan2(x_gl, z_gl)) + 90)))
+
+    # Distância horizontal total + altura relativa ao pivot do ombro
+    d   = math.sqrt(x_gl**2 + z_gl**2)
+    dx  = d - 0.16                    # desconta offset do pivot
+    dy  = y_gl - (_L_BASE + 0.96)
+
+    rxy = math.sqrt(dx**2 + dy**2)
+    C   = (dx**2 + dy**2 + _EXT**2 - _L1**2) / (2.0 * _EXT)
+
+    if rxy < 1e-6 or abs(C) > rxy:
+        return None                   # ponto fora do workspace
+
+    phi   = math.atan2(dy, dx)
+    delta = math.acos(max(-1.0, min(1.0, C / rxy)))
+
+    for sign in [-1, 1]:              # -1 = cotovelo alto (preferido)
+        fr = phi + sign * delta
+        sr = math.atan2(dy - _EXT * math.sin(fr),
+                        dx - _EXT * math.cos(fr))
+        h  = int(90.0 - math.degrees(sr))
+        v  = int(90.0 - math.degrees(fr))
+        if 0 <= h <= 180 and 0 <= v <= 180:
+            return base, h, v
+
+    return None
+
+# =========================
+# XADREZ — conversão e movimento
+# =========================
+
+def casa_para_gl(casa: str):
+    """'E4' → (x_gl, z_gl) — centro da casa em coords OpenGL."""
+    col = "ABCDEFGH".index(casa[0].upper())
+    row = int(casa[1]) - 1
+    return (braco3d._TAB_OX + (col + 0.5) * braco3d._TAB_TAM,
+            braco3d._TAB_OZ + (row + 0.5) * braco3d._TAB_TAM)
+
+
+def _enqueue_ang(x: float, y: float, z: float, garra: int) -> bool:
+    """Calcula IK e insere '_ANG_b,h,v,g' na fila. False se inalcançável."""
+    ang = ik_para_ponto(x, y, z)
+    if ang is None:
+        print(f"  [IK] inalcançável ({x:.2f}, {y:.2f}, {z:.2f})")
+        return False
+    b, h, v = ang
+    _fila.put(f"_ANG_{b},{h},{v},{garra}")
+    return True
+
+
+def mover_peca(destino: str) -> bool:
+    """
+    Pega o Rei Branco da casa atual e deposita em 'destino'.
+    Coloca a sequência de ângulos na fila — o loop principal anima tudo.
+
+    Sequência:
+      1. Sobrevoar origem   (garra aberta)
+      2. Descer para pegar  (garra aberta)
+      3. Fechar garra       → dispara o agarro automático
+      4. Levantar           (peça junto)
+      5. Voar até destino
+      6. Descer no destino
+      7. Abrir garra        → solta a peça
+      8. Subir e repouso
+    """
+    origem = braco3d.get_rei_casa()
+    if not origem:
+        print("  [xadrez] Peça não está no tabuleiro.")
+        return False
+
+    destino = destino.upper().strip()
+    if destino == origem:
+        print(f"  [xadrez] Peça já está em {destino}.")
+        return True
+
+    # Validar notação (A-H + 1-8)
+    if not re.match(r"^[A-H][1-8]$", destino):
+        print(f"  [xadrez] Casa inválida: '{destino}'")
+        return False
+
+    ox, oz = casa_para_gl(origem)
+    dx, dz = casa_para_gl(destino)
+
+    TY   = 3.5    # altura de trânsito (garra voando)
+    GY   = 0.70   # altura de descida  (garra sobre a peça)
+    OPEN = 90     # garra semi-aberta
+    SHUT = 0      # garra fechada
+
+    print(f"\n  [xadrez] Rei Branco: {origem} → {destino}")
+    salvar_memoria(f"mover rei para {destino}", f"MOVER:{destino}")
+
+    ok = True
+    ok &= _enqueue_ang(ox, TY, oz, OPEN)   # 1. sobre origem
+    ok &= _enqueue_ang(ox, GY, oz, OPEN)   # 2. descer
+    ok &= _enqueue_ang(ox, GY, oz, SHUT)   # 3. fechar (pegar)
+    ok &= _enqueue_ang(ox, TY, oz, SHUT)   # 4. levantar
+    ok &= _enqueue_ang(dx, TY, dz, SHUT)   # 5. voar
+    ok &= _enqueue_ang(dx, GY, dz, SHUT)   # 6. descer destino
+    ok &= _enqueue_ang(dx, GY, dz, OPEN)   # 7. abrir (soltar)
+    ok &= _enqueue_ang(dx, TY, dz, OPEN)   # 8. subir
+    _fila.put("REPOUSO")
+
+    if not ok:
+        print("  [xadrez] Sequência incompleta — algum ponto inalcançável.")
+    return ok
 
 # =========================
 # EXECUÇÃO DIRETA (camera.py usa isso)
@@ -82,7 +215,7 @@ def listar_acoes():
     return braco3d.listar_acoes()
 
 # =========================
-# IA LOCAL (Ollama)
+# IA LOCAL (Ollama + LLaMA)
 # =========================
 
 def _ollama_disponivel() -> bool:
@@ -95,11 +228,28 @@ def _ollama_disponivel() -> bool:
 
 
 def traduzir_para_acoes(texto: str) -> str:
+    """Envia o texto ao LLaMA com contexto da posição atual da peça."""
     if not _ollama_disponivel():
         return ""
     import ollama
+
     historico = gerar_historico()
-    conteudo = f"Histórico:\n{historico}\n\nNovo comando: {texto}" if historico else texto
+
+    # Informa ao LLaMA a posição atual do rei
+    casa_atual = braco3d.get_rei_casa()
+    contexto_xadrez = (
+        f"Estado atual: Rei Branco está na casa {casa_atual}."
+        if casa_atual else
+        "Estado atual: Rei Branco está fora do tabuleiro."
+    )
+
+    partes = []
+    if historico:
+        partes.append(f"Histórico:\n{historico}")
+    partes.append(contexto_xadrez)
+    partes.append(f"Novo comando: {texto}")
+    conteudo = "\n\n".join(partes)
+
     resposta = ollama.chat(
         model=MODELO_IA,
         messages=[
@@ -112,12 +262,13 @@ def traduzir_para_acoes(texto: str) -> str:
 
 # =========================
 # THREAD: input + IA
-# (nunca bloqueia o pygame)
 # =========================
 
 def _thread_ia():
     print(f"\n=== Braço Robótico — IA Local ({MODELO_IA}) ===")
-    print("Digite comandos em linguagem natural. ENTER vazio para sair.\n")
+    print("Digite comandos em português.")
+    print("Exemplo: 'mova o rei branco de E4 para A1'")
+    print("ENTER vazio para sair.\n")
 
     while True:
         print(">> ", end="", flush=True)
@@ -147,7 +298,15 @@ def _thread_ia():
 
         for acao in resposta.split(","):
             acao = acao.strip()
-            if acao:
+            if not acao:
+                continue
+
+            # Comando de movimento de peça: MOVER:H5
+            if acao.startswith("MOVER:"):
+                destino = acao[6:].strip()
+                mover_peca(destino)   # coloca sequência _ANG_ na fila
+
+            else:
                 _fila.put(acao)
 
 # =========================
@@ -158,51 +317,63 @@ def _thread_ia():
 def main():
     braco3d.iniciar()
 
-    # inicia thread de IA em background
     threading.Thread(target=_thread_ia, daemon=True).start()
 
-    # estado de animação
-    PASSOS           = 25    # frames por movimento (~0.8 s a 30 fps)
-    PAUSA_ACOES      = 8     # frames de pausa entre ações consecutivas
+    PASSOS      = 25   # frames por movimento (~0.8 s a 30 fps)
+    PAUSA_ACOES = 8    # frames de pausa entre ações consecutivas
 
-    b0, h0, v0, g0              = braco.posicao()
+    b0, h0, v0, g0                  = braco.posicao()
     b_alvo, h_alvo, v_alvo, g_alvo = braco.posicao()
-    passo = PASSOS              # começa "parado" (sem animar)
+    passo = PASSOS
     pausa = 0
 
     while True:
-        # --- tenta buscar próxima ação quando parou de animar ---
         if passo >= PASSOS and pausa <= 0:
             try:
                 item = _fila.get_nowait()
             except queue.Empty:
                 item = _VAZIO
 
-            if item is None:                    # sinal de encerrar
+            if item is None:
                 break
 
-            if item is not _VAZIO:              # nova ação
-                angulos = braco3d.obter_acao(item)
-                if angulos:
+            if item is not _VAZIO:
+                angulos = None
+
+                # ── Ângulos diretos do IK (MOVER interno) ────────────────
+                if isinstance(item, str) and item.startswith("_ANG_"):
+                    try:
+                        parts  = item[5:].split(",")
+                        angulos = tuple(int(x) for x in parts)
+                        print(f"  [IK] base={angulos[0]} hori={angulos[1]}"
+                              f" vert={angulos[2]} garra={angulos[3]}")
+                    except Exception as e:
+                        print(f"  [_ANG_ erro] {e}")
+
+                # ── Ação pré-definida (LEVANTAR, REPOUSO, etc.) ──────────
+                else:
+                    angulos = braco3d.obter_acao(item)
+                    if angulos:
+                        print(f"  [{item}]")
+                    else:
+                        print(f"  [aviso] Ação desconhecida: {item}")
+
+                if angulos and len(angulos) == 4:
                     b0, h0, v0, g0 = braco.posicao()
                     b_alvo, h_alvo, v_alvo, g_alvo = angulos
                     braco.mover(*angulos)
-                    # servo físico em thread separada (não bloqueia o loop)
                     threading.Thread(
                         target=braco3d.mover_servo,
                         args=angulos,
                         daemon=True,
                     ).start()
-                    print(f"  [{item}]")
                     passo = 0
                     pausa = PAUSA_ACOES
-                else:
-                    print(f"  [aviso] Ação desconhecida: {item}")
 
         if pausa > 0:
             pausa -= 1
 
-        # --- interpolação suave ---
+        # Interpolação suave
         if passo < PASSOS:
             passo += 1
             t = passo / PASSOS
@@ -217,10 +388,6 @@ def main():
             break
 
     braco3d.fechar()
-
-
-# sentinela interna para distinguir "fila vazia" de "item None"
-_VAZIO = object()
 
 
 if __name__ == "__main__":
