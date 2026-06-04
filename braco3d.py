@@ -631,15 +631,19 @@ def limitar_angulos(base, hori, vert, garra):
     # Comprimento total do braço até a ponta dos dedos
     ext = L2 + 1.52 + GRIP_L + 0.64
 
-    # Ângulo mínimo do antebraço (fr) que mantém a ponta em z >= 0:
-    #   (L_BASE + 0.96 + L1*sin(sr) + ext*sin(fr)) >= 0
-    #   sin(fr) >= -(L_BASE + 0.96 + L1*sin(sr)) / ext
-    shoulder_r  = math.radians(90.0 - hori)
-    sin_fr_min  = -(L_BASE + 0.96 + L1 * math.sin(shoulder_r)) / ext
-    sin_fr_min  = max(-1.0, sin_fr_min)        # clamp para domínio válido
+    # Margem: a geometria física dos dedos estende ~0.25 un abaixo
+    # do eixo cinemático — manter a ponta acima de FLOOR_MARGIN
+    # evita que os bicos das garras atravessem o chão.
+    FLOOR_MARGIN = 0.25
 
-    fr_min      = math.asin(sin_fr_min)         # ângulo mínimo do antebraço (rad)
-    vert_max    = int(90.0 - math.degrees(fr_min))  # vert_ang máximo permitido
+    # sin(fr_min) tal que ponta >= FLOOR_MARGIN:
+    #   L_BASE + 0.96 + L1*sin(sr) + ext*sin(fr) >= FLOOR_MARGIN
+    shoulder_r  = math.radians(90.0 - hori)
+    sin_fr_min  = -(L_BASE + 0.96 + L1 * math.sin(shoulder_r) - FLOOR_MARGIN) / ext
+    sin_fr_min  = max(-1.0, sin_fr_min)
+
+    fr_min   = math.asin(sin_fr_min)
+    vert_max = int(90.0 - math.degrees(fr_min))
 
     vert = min(vert, vert_max)
 

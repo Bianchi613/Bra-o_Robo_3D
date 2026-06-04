@@ -398,11 +398,13 @@ def main():
 
                 if angulos and len(angulos) == 4:
                     b0, h0, v0, g0 = braco.posicao()
-                    b_alvo, h_alvo, v_alvo, g_alvo = angulos
                     braco.mover(*angulos)
+                    # Usa a posição CLAMPED como alvo — garante que o alvo
+                    # final também respeita limitar_angulos
+                    b_alvo, h_alvo, v_alvo, g_alvo = braco.posicao()
                     threading.Thread(
                         target=braco3d.mover_servo,
-                        args=angulos,
+                        args=(b_alvo, h_alvo, v_alvo, g_alvo),
                         daemon=True,
                     ).start()
                     passo = 0
@@ -411,7 +413,8 @@ def main():
         if pausa > 0:
             pausa -= 1
 
-        # Interpolação suave
+        # Interpolação suave — aplica limitar_angulos em cada frame
+        # para evitar que dedos atravessem o chão durante a animação
         if passo < PASSOS:
             passo += 1
             t = passo / PASSOS
@@ -422,6 +425,7 @@ def main():
         else:
             b, h, v, g = b_alvo, h_alvo, v_alvo, g_alvo
 
+        b, h, v, g = braco3d.limitar_angulos(b, h, v, g)
         if not braco3d.atualizar(b, h, v, g):
             break
 
