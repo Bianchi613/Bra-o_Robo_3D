@@ -250,27 +250,17 @@ def _ollama_disponivel() -> bool:
 
 
 def traduzir_para_acoes(texto: str) -> str:
-    """Envia o texto ao LLaMA com contexto da posição atual da peça."""
+    """Envia o texto ao LLaMA com a posição atual do Rei Branco."""
     if not _ollama_disponivel():
         return ""
     import ollama
 
-    historico = gerar_historico()
-
-    # Informa ao LLaMA a posição atual do rei
+    # Só envia a posição atual — histórico confunde o modelo (ele ecoa tudo)
     casa_atual = braco3d.get_rei_casa()
-    contexto_xadrez = (
-        f"Estado atual: Rei Branco está na casa {casa_atual}."
-        if casa_atual else
-        "Estado atual: Rei Branco está fora do tabuleiro."
-    )
+    pos = f"Rei Branco está na casa {casa_atual}." if casa_atual else \
+          "Rei Branco está fora do tabuleiro."
 
-    partes = []
-    if historico:
-        partes.append(f"Histórico:\n{historico}")
-    partes.append(contexto_xadrez)
-    partes.append(f"Novo comando: {texto}")
-    conteudo = "\n\n".join(partes)
+    conteudo = f"{pos}\nComando: {texto}"
 
     resposta = ollama.chat(
         model=MODELO_IA,
@@ -281,6 +271,29 @@ def traduzir_para_acoes(texto: str) -> str:
         options={"temperature": 0.0},
     )
     return resposta["message"]["content"].strip().upper()
+
+
+def _extrair_acoes(resposta: str) -> list:
+    """
+    Extrai ações válidas da resposta do LLaMA de forma robusta.
+    Funciona mesmo quando o modelo ecoa histórico ou adiciona texto extra.
+    Prioridade: MOVER:CASA > ações predefinidas conhecidas.
+    """
+    acoes_validas = set(braco3d.listar_acoes())
+
+    # Prioridade 1: MOVER:CASA em qualquer lugar do texto
+    m = re.search(r'\bMOVER:([A-H][1-8])\b', resposta, re.IGNORECASE)
+    if m:
+        return [f"MOVER:{m.group(1).upper()}"]
+
+    # Prioridade 2: ações predefinidas conhecidas (tokens separados por vírgula/espaço)
+    resultado = []
+    for token in re.split(r'[,\s\n→:\-]+', resposta.upper()):
+        token = token.strip()
+        if token in acoes_validas and token not in resultado:
+            resultado.append(token)
+
+    return resultado
 
 # =========================
 # THREAD: input + IA
@@ -315,20 +328,21 @@ def _thread_ia():
         if not resposta:
             continue
 
-        print(f"→ {resposta}")
-        salvar_memoria(texto, resposta)
+        # Extrair ações válidas da resposta (robusto a texto extra do modelo)
+        acoes = _extrair_acoes(resposta)
 
-        acoes = [a.strip() for a in resposta.split(",") if a.strip()]
+        if not acoes:
+            print("→ (nenhuma ação reconhecida)")
+            continue
 
-        # Se a resposta contém MOVER:, ignorar TODAS as outras ações.
-        # MOVER já cuida de toda a sequência (levantar, pegar, soltar, repouso).
-        # Misturar ações predefinidas com MOVER causa movimentos erráticos.
+        print(f"→ {', '.join(acoes)}")
+        salvar_memoria(texto, ", ".join(acoes))
+
         mover_cmds = [a for a in acoes if a.startswith("MOVER:")]
-
         if mover_cmds:
+            # MOVER cuida de tudo — ignorar qualquer ação predefinida
             for cmd in mover_cmds:
-                destino = cmd[6:].strip()
-                mover_peca(destino)
+                mover_peca(cmd[6:])
         else:
             for acao in acoes:
                 _fila.put(acao)
