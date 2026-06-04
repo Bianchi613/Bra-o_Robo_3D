@@ -311,6 +311,20 @@ def _mover_cubo_teclado(key):
     elif key == K_UP:    _cubo_pos[2] -= p
     elif key == K_DOWN:  _cubo_pos[2] += p
 
+def _snap_peca_para_casa():
+    """
+    Ao soltar a peça, encaixa no centro da casa do tabuleiro mais próxima.
+    Elimina deslizamento causado pela abertura da garra.
+    """
+    col = int((_cubo_pos[0] - _TAB_OX) / _TAB_TAM)
+    row = int((_cubo_pos[2] - _TAB_OZ) / _TAB_TAM)
+    col = max(0, min(_TAB_N - 1, col))
+    row = max(0, min(_TAB_N - 1, row))
+    _cubo_pos[0] = _TAB_OX + (col + 0.5) * _TAB_TAM
+    _cubo_pos[1] = 0.0
+    _cubo_pos[2] = _TAB_OZ + (row + 0.5) * _TAB_TAM
+
+
 def _gl_para_casa(x_gl, z_gl):
     """Converte posição GL para notação xadrez ('A1'–'H8'). None se fora do tabuleiro."""
     col = int((x_gl - _TAB_OX) / _TAB_TAM)
@@ -365,7 +379,8 @@ def _verificar_agarro(base_ang, hori_ang, vert_ang, garra_ang):
         GARRA_TOQUE_SOL = int((_CUBO_TAM - 0.18) / GRIP_MAX * 180)
         if garra_ang > GARRA_TOQUE_SOL + 5:
             _cubo_agarro = False
-            _cubo_vy = -0.06
+            _cubo_vy = 0.0
+            _snap_peca_para_casa()
     else:
         # Posições individuais de cada dedo em coords mundo
         lx, ly, lz = _finger_pos_gl(base_ang, hori_ang, vert_ang, garra_ang, -1)
