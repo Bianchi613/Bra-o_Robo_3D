@@ -93,10 +93,23 @@ _cam_pitch = 30.0
 _cam_dist  = 28.0
 _mouse_btn = False
 _mouse_pos = (0, 0)
-_fonte_hud = None
+_fonte_hud   = None
+_fonte_label = None
+_label_surfs = {}   # cache: texto → pygame.Surface
 
 # Cubo interativo
-_cubo_pos  = [0.0, 0.0, 9.5]
+_cubo_pos  = [0.5, 0.0, 7.5]   # quadrado E4 do tabuleiro (OZ=4)
+
+# Rastreamento de posição da peça no tabuleiro
+_rei_casa_atual   = "E4"   # casa onde o rei está agora
+_rei_historico    = []     # lista de (de, para) dos últimos movimentos
+_rei_era_agarrado = False  # para detectar transição solto→agarrado→solto
+
+# Posição e geometria do tabuleiro — alterar aqui move tudo junto
+_TAB_OX  = -4.0   # borda esquerda (X)
+_TAB_OZ  =  4.0   # borda frontal (Z) — calculado para 64/64 casas alcançáveis
+_TAB_TAM =  1.0   # tamanho de cada casa (≈ 25 mm)
+_TAB_N   =  8     # casas por lado
 _cubo_agarro = False
 _cubo_vy   = 0.0
 _CUBO_TAM  = 0.30    # meia-aresta
@@ -107,7 +120,7 @@ _CUBO_RAIO = 2.2     # raio de captura e exibição
 
 def iniciar(largura=920, altura=660, titulo="Braço Robótico 3D  |  Arraste=girar  |  Scroll=zoom"):
     """Cria a janela pygame com contexto OpenGL. Deve ser chamado uma vez."""
-    global _clock, _aberto, _largura, _altura, _fonte_hud
+    global _clock, _aberto, _largura, _altura, _fonte_hud, _fonte_label, _label_surfs
     pygame.init()
     pygame.font.init()
     _largura, _altura = largura, altura
@@ -116,7 +129,9 @@ def iniciar(largura=920, altura=660, titulo="Braço Robótico 3D  |  Arraste=gir
     _init_gl(largura, altura)
     _clock = pygame.time.Clock()
     _aberto = True
-    _fonte_hud = pygame.font.SysFont("Consolas", 15)
+    _fonte_hud   = pygame.font.SysFont("Consolas", 15)
+    _fonte_label = pygame.font.SysFont("Consolas", 17, bold=True)
+    _label_surfs = {}
 
 
 def atualizar(base, hori, vert, garra, fps=30):
@@ -141,6 +156,7 @@ def atualizar(base, hori, vert, garra, fps=30):
         _processar_mouse(ev)
 
     _verificar_agarro(base, hori, vert, garra)
+    _atualizar_posicao_rei()
     _render(base, hori, vert, garra)
     if _clock:
         _clock.tick(fps)
@@ -295,6 +311,40 @@ def _mover_cubo_teclado(key):
     elif key == K_UP:    _cubo_pos[2] -= p
     elif key == K_DOWN:  _cubo_pos[2] += p
 
+def _gl_para_casa(x_gl, z_gl):
+    """Converte posição GL para notação xadrez ('A1'–'H8'). None se fora do tabuleiro."""
+    col = int((x_gl - _TAB_OX) / _TAB_TAM)
+    row = int((z_gl - _TAB_OZ) / _TAB_TAM)
+    if 0 <= col < _TAB_N and 0 <= row < _TAB_N:
+        return 'ABCDEFGH'[col] + str(row + 1)
+    return None
+
+
+def get_rei_casa():
+    """Retorna a casa atual do rei ('E4', etc.) ou None se fora do tabuleiro."""
+    return _rei_casa_atual
+
+
+def _atualizar_posicao_rei():
+    """Detecta mudança de casa e registra o movimento no histórico."""
+    global _rei_casa_atual, _rei_historico, _rei_era_agarrado
+
+    nova_casa = _gl_para_casa(_cubo_pos[0], _cubo_pos[2])
+
+    # Registra o movimento quando a peça passa de uma casa para outra
+    if nova_casa != _rei_casa_atual:
+        origem = _rei_casa_atual or "?"
+        destino = nova_casa or "fora"
+        # Só registra movimentos significativos (de/para casas válidas)
+        if _rei_casa_atual and nova_casa:
+            _rei_historico.append((origem, destino))
+            if len(_rei_historico) > 4:
+                _rei_historico.pop(0)
+        _rei_casa_atual = nova_casa
+
+    _rei_era_agarrado = _cubo_agarro
+
+
 def _verificar_agarro(base_ang, hori_ang, vert_ang, garra_ang):
     """Agarro simples e confiável: perto + fecha = agarra, abre = solta."""
     global _cubo_agarro, _cubo_pos, _cubo_vy
@@ -428,6 +478,97 @@ def _desenhar_cubo(base_ang, hori_ang, vert_ang):
     glDepthMask(GL_TRUE)
     glDisable(GL_BLEND)
     glEnable(GL_LIGHTING)
+
+
+def _desenhar_rei(base_ang, hori_ang, vert_ang):
+    """Peça de xadrez — Rei (substitui o cubo na cena)."""
+    gx, gy, gz    = _claw_center_gl(base_ang, hori_ang, vert_ang)
+    kcx, kcy, kcz = _cubo_centro()
+    dist = math.sqrt((gx-kcx)**2 + (gy-kcy)**2 + (gz-kcz)**2)
+
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_DEPTH_TEST)
+    glDepthMask(GL_FALSE)
+
+    if _cubo_agarro:
+        px, py, pz = gx, max(0.0, gy + 0.28 - _CUBO_TAM), gz
+        MARFIM = (0.40, 0.85, 1.00, 1.0)
+        OURO   = (0.25, 0.65, 0.95, 1.0)
+    else:
+        px, py, pz = _cubo_pos[0], _cubo_pos[1], _cubo_pos[2]
+        MARFIM = (0.94, 0.90, 0.78, 1.0)
+        OURO   = (0.88, 0.72, 0.18, 1.0)
+
+    def ycyl(r, y_base, h, sl=22):
+        glPushMatrix()
+        glTranslatef(0, y_base, 0)
+        glRotatef(-90, 1, 0, 0)
+        _cyl(r, h, sl)
+        glPopMatrix()
+
+    glEnable(GL_LIGHTING)
+    glPushMatrix()
+    glTranslatef(px, py, pz)
+
+    # ── Base ─────────────────────────────────────────────────────────
+    glColor4f(*MARFIM)
+    ycyl(0.38, 0.00, 0.05, 28)        # disco externo
+    ycyl(0.30, 0.05, 0.07, 24)        # anel da base
+
+    # ── Corpo inferior (esfera grande) ────────────────────────────────
+    glPushMatrix(); glTranslatef(0, 0.26, 0); _sph(0.20, 18); glPopMatrix()
+
+    # ── Cintura fina ──────────────────────────────────────────────────
+    ycyl(0.09, 0.40, 0.24, 16)
+
+    # ── Corpo superior (esfera) ───────────────────────────────────────
+    glPushMatrix(); glTranslatef(0, 0.74, 0); _sph(0.18, 16); glPopMatrix()
+
+    # ── Faixa dourada da coroa ────────────────────────────────────────
+    glColor4f(*OURO)
+    ycyl(0.27, 0.88, 0.10, 24)
+
+    # ── Plataforma do topo ────────────────────────────────────────────
+    glColor4f(*MARFIM)
+    ycyl(0.19, 0.98, 0.04, 20)
+
+    # ── Cruz: haste vertical ──────────────────────────────────────────
+    glColor4f(*OURO)
+    glPushMatrix(); glTranslatef(0, 1.22, 0); _box(0.065, 0.48, 0.065); glPopMatrix()
+    # ── Cruz: braço horizontal ────────────────────────────────────────
+    glPushMatrix(); glTranslatef(0, 1.34, 0); _box(0.28,  0.075, 0.065); glPopMatrix()
+    # ── Ornamento do topo ─────────────────────────────────────────────
+    glPushMatrix(); glTranslatef(0, 1.48, 0); _sph(0.062, 10); glPopMatrix()
+
+    glPopMatrix()
+
+    # ── Sombra circular no chão ───────────────────────────────────────
+    if not _cubo_agarro:
+        glDisable(GL_LIGHTING)
+        glColor4f(0.0, 0.0, 0.0, 0.28)
+        glPushMatrix()
+        glTranslatef(px, 0.007, pz)
+        glRotatef(-90, 1, 0, 0)
+        q = gluNewQuadric(); gluDisk(q, 0, 0.42, 24, 1); gluDeleteQuadric(q)
+        glPopMatrix()
+        glEnable(GL_LIGHTING)
+
+    # ── Linha de proximidade ──────────────────────────────────────────
+    if not _cubo_agarro and dist < _CUBO_RAIO:
+        glDisable(GL_LIGHTING)
+        t = 1.0 - dist / _CUBO_RAIO
+        glColor4f(0.2, 1.0, 0.3, t * 0.8)
+        glLineWidth(2.0)
+        glBegin(GL_LINES)
+        glVertex3f(gx, gy, gz)
+        glVertex3f(kcx, kcy + 0.6, kcz)
+        glEnd()
+        glLineWidth(1.0)
+        glEnable(GL_LIGHTING)
+
+    glDepthMask(GL_TRUE)
+    glDisable(GL_BLEND)
 
 
 # ═══════════════════════════  Câmera  ════════════════════════════════════════
@@ -742,6 +883,169 @@ def _grid():
     glEnable(GL_LIGHTING)
 
 
+# ═══════════════════════  Tabuleiro de xadrez  ═══════════════════════════════
+
+# Segmentos de cada caractere em espaço normalizado (0..1 × 0..1):
+#   x=0 esquerda, x=1 direita, y=0 baixo, y=1 topo
+_SEGS_3D = {
+    'A': [(.0,.0,.5,1),(.5,1,1,.0),(.15,.45,.85,.45)],
+    'B': [(.0,.0,.0,1),(.0,1,.65,1),(.65,1,.65,.5),(.0,.5,.65,.5),(.65,.5,.65,.0),(.0,.0,.65,.0)],
+    'C': [(.85,.85,.4,1),(.4,1,.0,.8),(.0,.8,.0,.2),(.0,.2,.4,.0),(.4,.0,.85,.15)],
+    'D': [(.0,.0,.0,1),(.0,1,.55,.95),(.55,.95,1,.7),(1,.7,1,.3),(1,.3,.55,.05),(.55,.05,.0,.0)],
+    'E': [(.0,.0,.0,1),(.0,1,1,1),(.0,.5,.75,.5),(.0,.0,1,.0)],
+    'F': [(.0,.0,.0,1),(.0,1,1,1),(.0,.5,.75,.5)],
+    'G': [(.85,.85,.4,1),(.4,1,.0,.8),(.0,.8,.0,.2),(.0,.2,.4,.0),(.4,.0,.9,.15),(.9,.15,1,.3),(1,.3,.5,.3)],
+    'H': [(.0,.0,.0,1),(1,.0,1,1),(.0,.5,1,.5)],
+    '1': [(.25,.75,.5,1),(.5,.0,.5,1),(.1,.0,.9,.0)],
+    '2': [(.1,.85,.5,1),(.5,1,.9,.75),(.9,.75,.1,.1),(.1,.1,.0,.0),(.0,.0,1,.0)],
+    '3': [(.0,.85,.45,1),(.45,1,1,.7),(1,.7,.3,.5),(.3,.5,1,.3),(1,.3,.45,.0),(.45,.0,.0,.15)],
+    '4': [(.0,1,.0,.5),(.0,.5,1,.5),(1,1,1,.0)],
+    '5': [(1,1,.0,1),(.0,1,.0,.5),(.0,.5,.8,.5),(.8,.5,1,.3),(1,.3,.8,.0),(.8,.0,.0,.0)],
+    '6': [(.8,1,.2,1),(.2,1,.0,.8),(.0,.8,.0,.0),(.0,.0,1,.0),(1,.0,1,.5),(1,.5,.0,.5)],
+    '7': [(.0,1,1,1),(1,1,.2,.0)],
+    '8': [(.0,.0,.0,1),(.0,1,1,1),(1,1,1,.0),(1,.0,.0,.0),(.0,.5,1,.5)],
+}
+
+
+def _char_3d_bottom(ch, cx, cz, s, y=0.009):
+    """Emite vértices (dentro de GL_LINES) para char na borda sul/norte."""
+    for x0, y0, x1, y1 in _SEGS_3D.get(str(ch).upper(), []):
+        glVertex3f(cx + (x0-0.5)*s, y, cz - (y0-0.5)*s)
+        glVertex3f(cx + (x1-0.5)*s, y, cz - (y1-0.5)*s)
+
+
+def _char_3d_left(ch, cx, cz, s, y=0.009):
+    """Emite vértices (dentro de GL_LINES) para char na borda oeste/leste."""
+    for x0, y0, x1, y1 in _SEGS_3D.get(str(ch).upper(), []):
+        glVertex3f(cx - (y0-0.5)*s, y, cz + (x0-0.5)*s)
+        glVertex3f(cx - (y1-0.5)*s, y, cz + (x1-0.5)*s)
+
+
+def _tabuleiro_xadrez():
+    glDisable(GL_LIGHTING)
+    glDepthMask(GL_TRUE)
+
+    TAM   = _TAB_TAM
+    N     = _TAB_N
+    OX    = _TAB_OX
+    OZ    = _TAB_OZ
+    Y     = 0.006
+    BORDA = 0.55   # largura da moldura
+
+    bx0 = OX - BORDA;       bx1 = OX + N*TAM + BORDA
+    bz0 = OZ - BORDA;       bz1 = OZ + N*TAM + BORDA
+    ix0 = OX;               ix1 = OX + N*TAM
+    iz0 = OZ;               iz1 = OZ + N*TAM
+
+    # ── Moldura de madeira (4 tiras) ────────────────────────────────────────
+    glColor3f(0.45, 0.28, 0.08)
+    glNormal3f(0, 1, 0)
+    glBegin(GL_QUADS)
+    glVertex3f(bx0,Y,bz0); glVertex3f(bx1,Y,bz0); glVertex3f(bx1,Y,iz0); glVertex3f(bx0,Y,iz0)
+    glVertex3f(bx0,Y,iz1); glVertex3f(bx1,Y,iz1); glVertex3f(bx1,Y,bz1); glVertex3f(bx0,Y,bz1)
+    glVertex3f(bx0,Y,iz0); glVertex3f(ix0,Y,iz0); glVertex3f(ix0,Y,iz1); glVertex3f(bx0,Y,iz1)
+    glVertex3f(ix1,Y,iz0); glVertex3f(bx1,Y,iz0); glVertex3f(bx1,Y,iz1); glVertex3f(ix1,Y,iz1)
+    glEnd()
+
+    # ── Casas (preto / branco) ───────────────────────────────────────────────
+    glNormal3f(0, 1, 0)
+    glBegin(GL_QUADS)
+    for row in range(N):
+        for col in range(N):
+            if (row + col) % 2 == 0:
+                glColor3f(0.10, 0.08, 0.08)
+            else:
+                glColor3f(0.90, 0.88, 0.82)
+            x0 = OX + col*TAM;  x1 = x0 + TAM
+            z0 = OZ + row*TAM;  z1 = z0 + TAM
+            glVertex3f(x0, Y+.001, z0); glVertex3f(x1, Y+.001, z0)
+            glVertex3f(x1, Y+.001, z1); glVertex3f(x0, Y+.001, z1)
+    glEnd()
+
+    glEnable(GL_LIGHTING)
+
+
+def _renderizar_labels_tabuleiro():
+    """Projeta as coordenadas 3D das labels para 2D e as desenha via pygame."""
+    if not _fonte_label:
+        return
+
+    TAM = _TAB_TAM; N = _TAB_N; OX = _TAB_OX; OZ = _TAB_OZ; BORDA = 0.55
+    GAP = BORDA * 0.52
+    Y   = 0.02
+
+    # Posições 3D de cada label: (texto, x, y, z)
+    labels = []
+    for col in range(N):
+        cx = OX + col*TAM + TAM*0.5
+        labels.append(('ABCDEFGH'[col], cx, Y, OZ - GAP))
+        labels.append(('ABCDEFGH'[col], cx, Y, OZ + N*TAM + GAP))
+    for row in range(N):
+        cz = OZ + row*TAM + TAM*0.5
+        labels.append((str(row + 1), OX - GAP,          Y, cz))
+        labels.append((str(row + 1), OX + N*TAM + GAP,  Y, cz))
+
+    modelview  = glGetDoublev(GL_MODELVIEW_MATRIX)
+    projection = glGetDoublev(GL_PROJECTION_MATRIX)
+    viewport   = glGetIntegerv(GL_VIEWPORT)
+
+    # Pré-renderizar surfaces (cache por texto)
+    for text, wx, wy, wz in labels:
+        if text not in _label_surfs:
+            surf = pygame.Surface(
+                _fonte_label.size(text), pygame.SRCALPHA)
+            surf.fill((0, 0, 0, 0))
+            surf.blit(_fonte_label.render(text, True, (230, 210, 140)), (0, 0))
+            _label_surfs[text] = surf
+
+    # Mudar para projeção 2D ortográfica
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+    glOrtho(0, _largura, 0, _altura, -1, 1)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glDisable(GL_DEPTH_TEST)
+    glDisable(GL_LIGHTING)
+    glEnable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glColor4f(1, 1, 1, 1)
+
+    for text, wx, wy, wz in labels:
+        try:
+            sx, sy, sz = gluProject(wx, wy, wz, modelview, projection, viewport)
+        except Exception:
+            continue
+        if sz < 0.0 or sz > 1.0:
+            continue
+
+        surf = _label_surfs[text]
+        w, h = surf.get_size()
+        raw  = pygame.image.tostring(surf, "RGBA", True)
+
+        tid = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, raw)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+
+        x0 = sx - w / 2.0
+        y0 = sy - h / 2.0
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(x0,     y0)
+        glTexCoord2f(1, 0); glVertex2f(x0 + w, y0)
+        glTexCoord2f(1, 1); glVertex2f(x0 + w, y0 + h)
+        glTexCoord2f(0, 1); glVertex2f(x0,     y0 + h)
+        glEnd()
+
+        glDeleteTextures(1, [tid])
+
+    glDisable(GL_TEXTURE_2D)
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_LIGHTING)
+    glMatrixMode(GL_PROJECTION); glPopMatrix()
+    glMatrixMode(GL_MODELVIEW);  glPopMatrix()
+
+
 # ═══════════════════════════  Render principal  ══════════════════════════════
 
 def _render(base_ang, hori_ang, vert_ang, garra_ang):
@@ -754,6 +1058,7 @@ def _render(base_ang, hori_ang, vert_ang, garra_ang):
     ez = _cam_dist * math.cos(pr) * math.cos(yr)
     gluLookAt(ex, ey, ez, 0.0, FOCAL_Y, 0.0, 0.0, 1.0, 0.0)
     _grid()
+    _tabuleiro_xadrez()
     glDepthMask(GL_FALSE)
     glPushMatrix()
 
@@ -863,13 +1168,14 @@ def _render(base_ang, hori_ang, vert_ang, garra_ang):
     glEnable(GL_LIGHTING)
     glPopMatrix()
 
-    # CUBO AGARRADO — antes dos dedos para dedos aparecerem na frente
+    # REI AGARRADO — brilho dourado entre os dedos (profundidade correta)
     if _cubo_agarro:
         glPushMatrix()
         glTranslatef(0, 0.28, 1.52 + GRIP_L * 0.5)
-        glColor4f(0.15, 0.50, 1.0, ALPHA)
+        glDisable(GL_LIGHTING)
+        glColor4f(0.88, 0.72, 0.18, 0.55)
+        _sph(0.18, 10)
         glEnable(GL_LIGHTING)
-        _box(_CUBO_TAM*2, _CUBO_TAM*2, _CUBO_TAM*2)
         glPopMatrix()
 
     # MAXILAS — depois → aparecem na frente do cubo e da esfera
@@ -879,7 +1185,8 @@ def _render(base_ang, hori_ang, vert_ang, garra_ang):
     glPopMatrix()
     glDepthMask(GL_TRUE)
 
-    _desenhar_cubo(base_ang, hori_ang, vert_ang)
+    _desenhar_rei(base_ang, hori_ang, vert_ang)
+    _renderizar_labels_tabuleiro()
     _renderizar_hud(base_ang, hori_ang, vert_ang, garra_ang)
 
     pygame.display.flip()
@@ -946,11 +1253,21 @@ def _renderizar_hud(base_ang, hori_ang, vert_ang, garra_ang):
         (f"  {dist_plano:>9.1f} mm",         (255, 220, 80)),
         (f"  (0 = toca o plano)", (110, 110, 110)),
         ("", None),
-        ("── CUBO ─────────────", (255, 180, 50)),
-        (f"  X {_cubo_pos[0]*25:>10.1f} mm", (255, 180, 50)),
-        (f"  Y {_cubo_pos[2]*25:>10.1f} mm", (255, 180, 50)),
-        (f"  Z {_cubo_pos[1]*25:>10.1f} mm", (255, 180, 50)),
+        ("── REI BRANCO ────────", (255, 200, 80)),
     ]
+
+    # Casa atual no tabuleiro
+    if _rei_casa_atual:
+        cor_casa = (255, 220, 80) if not _cubo_agarro else (80, 200, 255)
+        linhas.append((f"  Casa:  {_rei_casa_atual}", cor_casa))
+    else:
+        linhas.append(("  fora do tabuleiro", (200, 80, 80)))
+
+    # Histórico de movimentos (últimos 4)
+    if _rei_historico:
+        linhas.append(("  ─ movimentos ──────", (100, 100, 100)))
+        for de, para in _rei_historico[-4:]:
+            linhas.append((f"  {de} → {para}", (180, 160, 100)))
 
     gx, gy, gz = _fingertip_gl(base_ang, hori_ang, vert_ang)
     cx, cy, cz = _cubo_centro()
@@ -962,9 +1279,10 @@ def _renderizar_hud(base_ang, hori_ang, vert_ang, garra_ang):
     else:
         status, cor_st = "livre", (150, 150, 150)
     linhas += [
+        ("", None),
         (f"  Dist {d_cubo:>7.1f} mm", (220, 220, 220)),
         (f"  {status}",               cor_st),
-        (f"  Setas = mover cubo",     (80, 80, 80)),
+        (f"  Setas = mover peca",     (80, 80, 80)),
     ]
 
     lh   = _fonte_hud.get_linesize() + 3
