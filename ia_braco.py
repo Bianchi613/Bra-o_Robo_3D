@@ -168,59 +168,47 @@ def mover_peca(destino: str) -> bool:
     ox, oz = casa_para_gl(origem)
     dx, dz = casa_para_gl(destino)
 
-    TY   = 3.5   # y de trânsito: altura segura para se mover
-    GY   = 0.35  # y de descida: pontas dos dedos sobre a peça (acima do FLOOR_MARGIN=0.25)
+    GY   = 0.35  # y de descida: pontas dos dedos sobre a peça
     OPEN = 90    # garra aberta
     SHUT = 0     # garra fechada
 
-    # ── Validação prévia: todos os pontos devem ser alcançáveis ───────────
-    # Se qualquer ponto falhar NÃO iniciamos a sequência — evita o braço
-    # pegar a peça sem conseguir chegar ao destino.
-    pontos = [
-        (ox, TY, oz), (ox, TY, oz),          # passos 2 e 3 (sobre origem)
-        (ox, GY, oz), (ox, GY, oz),          # passos 4 e 5 (descer / fechar)
-        (ox, TY, oz),                         # passo 6 (levantar)
-        (dx, TY, dz),                         # passo 7 (voar destino)
-        (dx, GY, dz), (dx, GY, dz),          # passos 8 e 9 (descer / soltar)
-        (dx, TY, dz),                         # passo 10 (subir)
-    ]
-    for x, y, z in pontos:
-        if ik_para_ponto(x, y, z) is None:
-            print(f"  [xadrez] Posição inalcançável — destino {destino} está fora do alcance.")
-            return False
+    # ── Validação: apenas GY precisa de IK — transit usa LEVANTAR_MAXIMO ──
+    # Usar um ponto IK de trânsito em altitude média (TY≈3.5) cria uma
+    # "zona morta" para quadrados próximos (F1, A1...) onde a geometria
+    # do braço não tem solução válida. LEVANTAR_MAXIMO é sempre alcançável.
+    if ik_para_ponto(ox, GY, oz) is None:
+        print(f"  [xadrez] Origem {origem} inalcançável em GY.")
+        return False
+    if ik_para_ponto(dx, GY, dz) is None:
+        print(f"  [xadrez] Destino {destino} fora do alcance.")
+        return False
 
     print(f"\n  ♟  Rei Branco: {origem} → {destino}")
     salvar_memoria(f"mover rei para {destino}", f"MOVER:{destino}")
 
-    # ── Passo 1: levantar o braço antes de qualquer movimento ──────────────
+    # ── Passo 1: levantar a posição segura (LEVANTAR_MAXIMO sempre funciona)
     _fila.put("LEVANTAR_MAXIMO")
 
-    # ── Passo 2: ir acima da peça (garra aberta) ───────────────────────────
-    _enqueue_ang(ox, TY, oz, OPEN)
-
-    # ── Passo 3: abrir a garra (garantia) ─────────────────────────────────
-    _enqueue_ang(ox, TY, oz, OPEN)
-
-    # ── Passo 4: descer até a peça (garra aberta) ─────────────────────────
+    # ── Passo 2: descer diretamente até a peça (garra aberta) ─────────────
     _enqueue_ang(ox, GY, oz, OPEN)
 
-    # ── Passo 5: fechar a garra → pega a peça ────────────────────────────
+    # ── Passo 3: confirmar garra aberta ───────────────────────────────────
+    _enqueue_ang(ox, GY, oz, OPEN)
+
+    # ── Passo 4: fechar a garra → pega a peça ────────────────────────────
     _enqueue_ang(ox, GY, oz, SHUT)
 
-    # ── Passo 6: levantar com a peça ──────────────────────────────────────
-    _enqueue_ang(ox, TY, oz, SHUT)
+    # ── Passo 5: levantar com a peça (LEVANTAR_MAXIMO mantém garra=0) ─────
+    _fila.put("LEVANTAR_MAXIMO")
 
-    # ── Passo 7: voar horizontalmente até o destino ───────────────────────
-    _enqueue_ang(dx, TY, dz, SHUT)
-
-    # ── Passo 8: descer no destino (peça ainda agarrada) ─────────────────
+    # ── Passo 6: descer no destino (peça agarrada) ───────────────────────
     _enqueue_ang(dx, GY, dz, SHUT)
 
-    # ── Passo 9: abrir a garra → solta a peça ────────────────────────────
+    # ── Passo 7: abrir a garra → solta a peça ────────────────────────────
     _enqueue_ang(dx, GY, dz, OPEN)
 
-    # ── Passo 10: voltar à posição inicial ───────────────────────────────
-    _enqueue_ang(dx, TY, dz, OPEN)
+    # ── Passo 8: levantar e voltar ao repouso ─────────────────────────────
+    _fila.put("LEVANTAR_MAXIMO")
     _fila.put("REPOUSO")
     return True
 
