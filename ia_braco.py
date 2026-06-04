@@ -135,17 +135,19 @@ def _enqueue_ang(x: float, y: float, z: float, garra: int) -> bool:
 def mover_peca(destino: str) -> bool:
     """
     Pega o Rei Branco da casa atual e deposita em 'destino'.
-    Coloca a sequência de ângulos na fila — o loop principal anima tudo.
+    Coloca a sequência de passos na fila — o loop principal anima cada um.
 
-    Sequência:
-      1. Sobrevoar origem   (garra aberta)
-      2. Descer para pegar  (garra aberta)
-      3. Fechar garra       → dispara o agarro automático
-      4. Levantar           (peça junto)
-      5. Voar até destino
-      6. Descer no destino
-      7. Abrir garra        → solta a peça
-      8. Subir e repouso
+    Sequência exata (10 passos):
+      1. Levantar o braço        → posição segura antes de qualquer movimento
+      2. Ir acima da origem      → sobrevoar a peça com garra aberta
+      3. Abrir a garra           → garantir garra aberta antes de descer
+      4. Descer até a peça       → garra aberta, posicionar sobre o Rei
+      5. Fechar a garra          → pegar a peça (agarro automático ativado)
+      6. Levantar com a peça     → subir com o Rei preso na garra
+      7. Voar até o destino      → mover horizontalmente em altitude segura
+      8. Descer no destino       → baixar a garra com a peça sobre a casa
+      9. Abrir a garra           → soltar a peça na casa destino
+     10. Voltar à posição inicial → REPOUSO
     """
     origem = braco3d.get_rei_casa()
     if not origem:
@@ -157,7 +159,6 @@ def mover_peca(destino: str) -> bool:
         print(f"  [xadrez] Peça já está em {destino}.")
         return True
 
-    # Validar notação (A-H + 1-8)
     if not re.match(r"^[A-H][1-8]$", destino):
         print(f"  [xadrez] Casa inválida: '{destino}'")
         return False
@@ -165,27 +166,48 @@ def mover_peca(destino: str) -> bool:
     ox, oz = casa_para_gl(origem)
     dx, dz = casa_para_gl(destino)
 
-    TY   = 3.5    # altura de trânsito (garra voando)
-    GY   = 0.70   # altura de descida  (garra sobre a peça)
-    OPEN = 90     # garra semi-aberta
-    SHUT = 0      # garra fechada
+    TY   = 3.5   # y de trânsito: altura segura para se mover
+    GY   = 0.50  # y de descida: centro da garra sobre a peça
+    OPEN = 90    # garra aberta
+    SHUT = 0     # garra fechada
 
-    print(f"\n  [xadrez] Rei Branco: {origem} → {destino}")
+    print(f"\n  ♟  Rei Branco: {origem} → {destino}")
     salvar_memoria(f"mover rei para {destino}", f"MOVER:{destino}")
 
     ok = True
-    ok &= _enqueue_ang(ox, TY, oz, OPEN)   # 1. sobre origem
-    ok &= _enqueue_ang(ox, GY, oz, OPEN)   # 2. descer
-    ok &= _enqueue_ang(ox, GY, oz, SHUT)   # 3. fechar (pegar)
-    ok &= _enqueue_ang(ox, TY, oz, SHUT)   # 4. levantar
-    ok &= _enqueue_ang(dx, TY, dz, SHUT)   # 5. voar
-    ok &= _enqueue_ang(dx, GY, dz, SHUT)   # 6. descer destino
-    ok &= _enqueue_ang(dx, GY, dz, OPEN)   # 7. abrir (soltar)
-    ok &= _enqueue_ang(dx, TY, dz, OPEN)   # 8. subir
+
+    # ── Passo 1: levantar o braço antes de qualquer movimento ──────────────
+    _fila.put("LEVANTAR_MAXIMO")
+
+    # ── Passo 2: ir acima da peça (garra aberta) ───────────────────────────
+    ok &= _enqueue_ang(ox, TY, oz, OPEN)
+
+    # ── Passo 3: abrir a garra (garantia) ─────────────────────────────────
+    ok &= _enqueue_ang(ox, TY, oz, OPEN)
+
+    # ── Passo 4: descer até a peça (garra aberta) ─────────────────────────
+    ok &= _enqueue_ang(ox, GY, oz, OPEN)
+
+    # ── Passo 5: fechar a garra → pega a peça ────────────────────────────
+    ok &= _enqueue_ang(ox, GY, oz, SHUT)
+
+    # ── Passo 6: levantar com a peça ──────────────────────────────────────
+    ok &= _enqueue_ang(ox, TY, oz, SHUT)
+
+    # ── Passo 7: voar horizontalmente até o destino ───────────────────────
+    ok &= _enqueue_ang(dx, TY, dz, SHUT)
+
+    # ── Passo 8: descer no destino (peça ainda agarrada) ─────────────────
+    ok &= _enqueue_ang(dx, GY, dz, SHUT)
+
+    # ── Passo 9: abrir a garra → solta a peça ────────────────────────────
+    ok &= _enqueue_ang(dx, GY, dz, OPEN)
+
+    # ── Passo 10: voltar à posição inicial ───────────────────────────────
     _fila.put("REPOUSO")
 
     if not ok:
-        print("  [xadrez] Sequência incompleta — algum ponto inalcançável.")
+        print("  [xadrez] Atenção: algum ponto da sequência é inalcançável.")
     return ok
 
 # =========================
